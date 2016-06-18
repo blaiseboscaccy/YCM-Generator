@@ -78,13 +78,6 @@ def main():
         "cdb": os.path.join(project_dir, "compile_commands.json")
     }[args["format"] if args["output"] is None else None]
 
-    if(os.path.exists(config_file) and not args["force"]):
-        print("'{}' already exists. Overwrite? [y/N] ".format(config_file)),
-        response = sys.stdin.readline().strip().lower()
-
-        if(response != "y" and response != "yes"):
-            return 1
-
     # command-line args to pass to fake_build() using kwargs
     args["make_cmd"] = args.pop("make")
     args["configure_opts"] = shlex.split(args["configure_opts"])
