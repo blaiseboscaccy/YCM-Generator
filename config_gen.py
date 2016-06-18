@@ -13,7 +13,7 @@ import tempfile
 import time
 import subprocess
 import glob
-
+import json
 
 # Default flags for make
 default_make_flags = ["-i", "-j" + str(multiprocessing.cpu_count())]
@@ -75,6 +75,7 @@ def main():
         None:  args["output"],
         "cc":  os.path.join(project_dir, ".color_coded"),
         "ycm": os.path.join(project_dir, ".ycm_extra_conf.py"),
+        "cdb": os.path.join(project_dir, "compile_commands.json")
     }[args["format"] if args["output"] is None else None]
 
     if(os.path.exists(config_file) and not args["force"]):
@@ -90,6 +91,7 @@ def main():
     args["make_flags"] = default_make_flags if args["make_flags"] is None else shlex.split(args["make_flags"])
     force_lang = args.pop("language")
     output_format = args.pop("format")
+    base_directory = os.path.abspath(args["PROJECT_DIR"])
     del args["compiler"]
     del args["force"]
     del args["output"]
@@ -105,8 +107,8 @@ def main():
         with tempfile.NamedTemporaryFile(mode="rw") as cxx_build_log:
             # perform the actual compilation of flags
             fake_build(project_dir, c_build_log.name, cxx_build_log.name, **args)
-            (c_count, c_skip, c_flags) = parse_flags(c_build_log)
-            (cxx_count, cxx_skip, cxx_flags) = parse_flags(cxx_build_log)
+            (c_count, c_skip, c_flags, c_db) = parse_flags(c_build_log, cc, base_directory)
+            (cxx_count, cxx_skip, cxx_flags, cxx_db) = parse_flags(cxx_build_log, cxx, base_directory)
 
             print("Collected {} relevant entries for C compilation ({} discarded).".format(c_count, c_skip))
             print("Collected {} relevant entries for C++ compilation ({} discarded).".format(cxx_count, cxx_skip))
@@ -130,6 +132,7 @@ def main():
             else:
                 lang, flags = ("c++", cxx_flags)
 
+            generate_compilation_database(base_directory, c_db, cxx_db)
             generate_conf(["-x", lang] + flags, config_file)
             print("Created {} config file with {} {} flags".format(output_format.upper(), len(flags), lang.upper()))
 
@@ -297,7 +300,65 @@ def fake_build(project_dir, c_build_log_path, cxx_build_log_path, verbose, make_
     print("")
 
 
-def parse_flags(build_log):
+def is_source(filename):
+    """ A predicate to decide the filename is a source file or not. """
+
+    accepted = {
+        '.c', '.cc', '.cp', '.cpp', '.cxx', '.c++', '.m', '.mm', '.i', '.ii',
+        '.mii'
+    }
+    __, ext = os.path.splitext(filename)
+    return ext.lower() in accepted
+
+
+def shell_escape(command):
+    """ Takes a command as list and returns a string. """
+
+    def needs_quote(word):
+        """ Returns true if worduments needs to be protected by quotes.
+
+        Previous implementation was shlex.split method, but that's not good
+        for this job. Currently is running through the string with a basic
+        state checking. """
+
+        reserved = {' ', '$', '%', '&', '(', ')', '[', ']', '{', '}', '*', '|',
+                    '<', '>', '@', '?', '!'}
+        state = 0
+        for current in word:
+            if state == 0 and current in reserved:
+                return True
+            elif state == 0 and current == '\\':
+                state = 1
+            elif state == 1 and current in reserved | {'\\'}:
+                state = 0
+            elif state == 0 and current == '"':
+                state = 2
+            elif state == 2 and current == '"':
+                state = 0
+            elif state == 0 and current == "'":
+                state = 3
+            elif state == 3 and current == "'":
+                state = 0
+        return state != 0
+
+    def escape(word):
+        """ Do protect argument if that's needed. """
+
+        table = {'\\': '\\\\', '"': '\\"', ' ': '\\ '}
+        escaped = ''.join([table.get(c, c) for c in word])
+
+        return '"' + escaped + '"' if needs_quote(word) else escaped
+
+    return " ".join([escape(arg) for arg in command])
+
+
+def parse_log_line(base_directory, which_compiler, args, target):
+    return {'directory': base_directory,
+            'command': which_compiler + " " + shell_escape(args),
+            'file': target}
+
+
+def parse_flags(build_log, which_compiler, base_directory):
     '''Creates a list of compiler flags from the build log.
 
     build_log: an iterator of lines
@@ -328,6 +389,8 @@ def parse_flags(build_log):
     # Used to only bundle filenames with applicable arguments
     filename_flags = ["-o", "-I", "-isystem", "-include", "-imacros", "-isysroot"]
 
+    compilation_db = []
+
     # Process build log
     for line in build_log:
         if(temp_output.search(line)):
@@ -336,8 +399,9 @@ def parse_flags(build_log):
 
         line_count += 1
         words = split_flags(line)
-
         for (i, word) in enumerate(words):
+            if is_source(word):
+                compilation_db.append(parse_log_line(base_directory, which_compiler, words, word))
             if(word[0] != '-' or not flags_whitelist.match(word)):
                 continue
 
@@ -376,7 +440,12 @@ def parse_flags(build_log):
 
         flags.add("-D{}={}".format(name, values[0]))
 
-    return (line_count, skip_count, sorted(flags))
+    return (line_count, skip_count, sorted(flags), compilation_db)
+
+
+def generate_compilation_database(base_directory, c_db, cxx_db):
+    with open(os.path.join(base_directory, "compile_commands.json"), 'w+') as cdb:
+        json.dump((c_db + cxx_db), cdb, sort_keys=True, indent=4)
 
 
 def generate_cc_conf(flags, config_file):
