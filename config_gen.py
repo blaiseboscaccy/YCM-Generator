@@ -383,6 +383,7 @@ def parse_flags(build_log, which_compiler, base_directory):
     filename_flags = ["-o", "-I", "-isystem", "-include", "-imacros", "-isysroot"]
 
     compilation_db = []
+    sources = set()
 
     # Process build log
     for line in build_log:
@@ -393,8 +394,11 @@ def parse_flags(build_log, which_compiler, base_directory):
         line_count += 1
         words = split_flags(line)
         for (i, word) in enumerate(words):
-            if is_source(word):
+            if is_source(word) and word not in sources:
                 compilation_db.append(parse_log_line(base_directory, which_compiler, words, word))
+                sources.add(word)
+            elif is_source(word):
+                print "skipping %s" % word
             if(word[0] != '-' or not flags_whitelist.match(word)):
                 continue
 
